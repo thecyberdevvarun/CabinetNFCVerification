@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.net.Uri;
-import android.net.http.SslError;
 import android.nfc.NdefMessage;
 import android.nfc.NdefRecord;
 import android.nfc.NfcAdapter;
@@ -15,30 +14,50 @@ import android.os.Bundle;
 import android.text.InputType;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
-import android.webkit.SslErrorHandler;
-import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.Collections;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Full-screen WebView that loads the Cabinet Validation web app and reads NFC cards natively.
- * Each card tap is sent to the page as window.__onNativeNfcTag({uid, serial}).
- * Barcode scanning (Zebra DataWedge keystroke output) types into the focused web field as usual.
+ * Standalone Cabinet Validation app.
+ *  - The web UI is bundled inside the APK (assets/www) and shown in a full-screen WebView.
+ *  - NFC cards are read natively and sent to the page as window.__onNativeNfcTag({uid, serial}).
+ *  - Saving goes straight from the device to SQL Server (JDBC). No PC server or Node backend is needed.
+ *  - Barcode scanning (Zebra DataWedge keystroke output) types into the focused web field as usual.
  */
 public class MainActivity extends Activity {
     private static final String PREFS = "cabinet_prefs";
-    private static final String KEY_URL = "server_url";
-    private static final Pattern SERIAL = Pattern.compile("\\d{20}");
+    private static final String APP_HOST = "appassets.local";
+    private static final String START_URL = "https://" + APP_HOST + "/index.html";
 
+    private static final Pattern SERIAL = Pattern.compile("\\d{20}");
+    private static final Pattern BARCODE = Pattern.compile("^F4\\d{13}$");
+    private static final Pattern NFC_PAYLOAD =
+            Pattern.compile("^(?:[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2})*;)?(\\d{20})$");
+
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private WebView webView;
     private NfcAdapter nfcAdapter;
 
@@ -58,25 +77,27 @@ public class MainActivity extends Activity {
 
         webView.addJavascriptInterface(new Bridge(), "AndroidNfc");
         webView.setWebViewClient(new WebViewClient() {
+            // Serve the bundled web app from the APK (assets/www) under a private https address.
             @Override
-            public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
-                // Allow the self-signed certificate only for the configured server.
-                String configured = Uri.parse(savedUrl()).getHost();
-                String requested = Uri.parse(error.getUrl()).getHost();
-                if (configured != null && configured.equals(requested)) handler.proceed();
-                else handler.cancel();
-            }
-
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) showErrorPage();
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (!APP_HOST.equals(uri.getHost())) return null;
+                String path = uri.getPath();
+                if (path == null || path.isEmpty() || path.equals("/")) path = "/index.html";
+                try {
+                    InputStream in = getAssets().open("www" + path);
+                    return new WebResourceResponse(mimeFor(path), "UTF-8", in);
+                } catch (IOException e) {
+                    return new WebResourceResponse("text/plain", "UTF-8", 404, "Not Found",
+                            Collections.<String, String>emptyMap(), new ByteArrayInputStream(new byte[0]));
+                }
             }
         });
 
         nfcAdapter = NfcAdapter.getDefaultAdapter(this);
+        webView.loadUrl(START_URL);
 
-        if (savedUrl().isEmpty()) promptForServer(false);
-        else webView.loadUrl(savedUrl());
+        if (!isConfigured()) showSettings();
     }
 
     @Override
@@ -98,6 +119,27 @@ public class MainActivity extends Activity {
         if (nfcAdapter != null) {
             try { nfcAdapter.disableReaderMode(this); } catch (Exception ignored) { }
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        executor.shutdown();
+    }
+
+    private static String mimeFor(String path) {
+        String p = path.toLowerCase();
+        if (p.endsWith(".html")) return "text/html";
+        if (p.endsWith(".js") || p.endsWith(".mjs")) return "application/javascript";
+        if (p.endsWith(".css")) return "text/css";
+        if (p.endsWith(".json")) return "application/json";
+        if (p.endsWith(".svg")) return "image/svg+xml";
+        if (p.endsWith(".png")) return "image/png";
+        if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
+        if (p.endsWith(".ico")) return "image/x-icon";
+        if (p.endsWith(".woff2")) return "font/woff2";
+        if (p.endsWith(".woff")) return "font/woff";
+        return "application/octet-stream";
     }
 
     // ---------- NFC ----------
@@ -149,42 +191,169 @@ public class MainActivity extends Activity {
         return sb.toString();
     }
 
-    // ---------- Server address ----------
-    private String savedUrl() {
-        return getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_URL, "");
+    // ---------- Database settings ----------
+    private SharedPreferences prefs() {
+        return getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
-    private void promptForServer(boolean cancelable) {
-        final EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setHint("http://192.168.1.50:5000");
-        input.setText(savedUrl());
-
-        AlertDialog.Builder builder = new AlertDialog.Builder(this)
-                .setTitle("Server address")
-                .setMessage("Enter the address of the Cabinet Validation server (the PC running the app).")
-                .setView(input)
-                .setCancelable(cancelable)
-                .setPositiveButton("Connect", (dialog, which) -> {
-                    String url = input.getText().toString().trim();
-                    if (url.isEmpty()) { promptForServer(cancelable); return; }
-                    if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://" + url;
-                    getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_URL, url).apply();
-                    webView.loadUrl(url);
-                });
-        if (cancelable) builder.setNegativeButton("Cancel", null);
-        builder.show();
+    private boolean isConfigured() {
+        return !prefs().getString("db_host", "").isEmpty() && !prefs().getString("db_user", "").isEmpty();
     }
 
-    private void showErrorPage() {
-        String html = "<html><body style='font-family:sans-serif;padding:32px;text-align:center'>"
-                + "<h2>Cannot reach the server</h2>"
-                + "<p>Check that the server PC is on, the app is running, and this device is on the same network.</p>"
-                + "<p style='color:#666'>" + savedUrl() + "</p>"
-                + "<button style='font-size:20px;padding:14px 28px;margin:8px' onclick='AndroidNfc.retry()'>Retry</button><br>"
-                + "<button style='font-size:20px;padding:14px 28px;margin:8px' onclick='AndroidNfc.changeServer()'>Change server</button>"
-                + "</body></html>";
-        webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+    private EditText addField(LinearLayout parent, String hint, String value, int inputType) {
+        EditText edit = new EditText(this);
+        edit.setHint(hint);
+        edit.setText(value);
+        edit.setInputType(inputType);
+        edit.setSingleLine(true);
+        parent.addView(edit);
+        return edit;
+    }
+
+    private void showSettings() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (20 * getResources().getDisplayMetrics().density);
+        layout.setPadding(pad, pad / 2, pad, 0);
+
+        final EditText host = addField(layout, "SQL Server address (e.g. 192.168.1.50 or PC\\SQLEXPRESS)",
+                prefs().getString("db_host", ""), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        final EditText port = addField(layout, "Port (default 1433)",
+                prefs().getString("db_port", "1433"), InputType.TYPE_CLASS_NUMBER);
+        final EditText name = addField(layout, "Database name",
+                prefs().getString("db_name", "CabinetValidation"), InputType.TYPE_CLASS_TEXT);
+        final EditText user = addField(layout, "SQL login user",
+                prefs().getString("db_user", ""), InputType.TYPE_CLASS_TEXT);
+        final EditText pass = addField(layout, "SQL login password",
+                prefs().getString("db_pass", ""), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(layout);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Database settings")
+                .setView(scroll)
+                .setPositiveButton("Save & test", (dialog, which) -> {
+                    prefs().edit()
+                            .putString("db_host", host.getText().toString().trim())
+                            .putString("db_port", port.getText().toString().trim())
+                            .putString("db_name", name.getText().toString().trim())
+                            .putString("db_user", user.getText().toString().trim())
+                            .putString("db_pass", pass.getText().toString())
+                            .apply();
+                    toast("Testing database connection...");
+                    executor.execute(() -> {
+                        String message;
+                        try (Connection ignored = openConnection()) {
+                            message = "Database connected.";
+                        } catch (Exception e) {
+                            message = "Connection failed: " + shorten(e.getMessage());
+                        }
+                        toast(message);
+                    });
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void toast(final String message) {
+        runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show());
+    }
+
+    private static String shorten(String text) {
+        if (text == null) return "unknown error";
+        return text.length() > 160 ? text.substring(0, 160) + "..." : text;
+    }
+
+    // ---------- Database ----------
+    private String jdbcUrl() {
+        String host = prefs().getString("db_host", "");
+        String port = prefs().getString("db_port", "1433");
+        String name = prefs().getString("db_name", "CabinetValidation");
+        String instance = "";
+        int slash = host.indexOf('\\');
+        if (slash >= 0) {
+            instance = host.substring(slash + 1);
+            host = host.substring(0, slash);
+        }
+        StringBuilder url = new StringBuilder("jdbc:jtds:sqlserver://").append(host);
+        if (instance.isEmpty()) url.append(':').append(port.isEmpty() ? "1433" : port);
+        url.append('/').append(name);
+        if (!instance.isEmpty()) url.append(";instance=").append(instance);
+        url.append(";loginTimeout=10;socketTimeout=20");
+        return url.toString();
+    }
+
+    private Connection openConnection() throws Exception {
+        Class.forName("net.sourceforge.jtds.jdbc.Driver");
+        return DriverManager.getConnection(jdbcUrl(), prefs().getString("db_user", ""), prefs().getString("db_pass", ""));
+    }
+
+    private static String normalizeNfc(String value) {
+        String text = value == null ? "" : value.trim();
+        Matcher m = NFC_PAYLOAD.matcher(text);
+        return m.matches() ? m.group(1) : text;
+    }
+
+    private static JSONObject result(boolean success, int status, String message) {
+        JSONObject json = new JSONObject();
+        try {
+            json.put("success", success);
+            json.put("status", status);
+            json.put("message", message);
+        } catch (Exception ignored) { }
+        return json;
+    }
+
+    // Same rules as the Node backend, then INSERT into dbo.cabinet_nfc_verification.
+    private JSONObject doSave(String payloadJson) {
+        try {
+            JSONObject in = new JSONObject(payloadJson);
+            String barcode = in.optString("foamingBarcode", "").trim().toUpperCase();
+            String inner = normalizeNfc(in.optString("innerNfc", ""));
+            String outer = normalizeNfc(in.optString("outerNfc", ""));
+            String area = in.optString("area", "");
+
+            if (!BARCODE.matcher(barcode).matches())
+                return result(false, 400, "Invalid Foaming Barcode. Expected F4 followed by 13 digits.");
+            if (inner.isEmpty() || outer.isEmpty())
+                return result(false, 400, "Both NFC values are required.");
+            if (!inner.equals(outer))
+                return result(false, 400, "Inner NFC and Outer NFC do not match.");
+            if (!area.equals("FREEZER_PRE") && !area.equals("FREEZER_POST"))
+                return result(false, 400, "Invalid area. Select Freezer Pre or Freezer Post.");
+            if (!isConfigured())
+                return result(false, 500, "Database is not set up. Tap \"Database settings\" on the first screen.");
+
+            try (Connection connection = openConnection();
+                 PreparedStatement statement = connection.prepareStatement(
+                         "INSERT INTO dbo.cabinet_nfc_verification (foaming_barcode, inner_ncf, outer_nfc, area) VALUES (?, ?, ?, ?)")) {
+                statement.setString(1, barcode);
+                statement.setString(2, inner);
+                statement.setString(3, outer);
+                statement.setString(4, area);
+                statement.executeUpdate();
+            }
+            return result(true, 201, "Cabinet saved successfully.");
+        } catch (SQLException e) {
+            // 2627 / 2601 = unique constraint violation (foaming_barcode + area)
+            if (e.getErrorCode() == 2627 || e.getErrorCode() == 2601) {
+                String label = payloadJson.contains("FREEZER_POST") ? "Freezer Post" : "Freezer Pre";
+                return result(false, 409, "This Foaming Barcode has already been verified in " + label + ".");
+            }
+            return result(false, 500, "Database error: " + shorten(e.getMessage()));
+        } catch (Exception e) {
+            return result(false, 500, "Cannot reach the database. Check Wi-Fi and Database settings. (" + shorten(e.getMessage()) + ")");
+        }
+    }
+
+    private void handleSave(final String requestId, final String payloadJson) {
+        executor.execute(() -> {
+            JSONObject res = doSave(payloadJson);
+            final String js = "window.__onNativeSaveResult && window.__onNativeSaveResult("
+                    + JSONObject.quote(requestId) + "," + res + ")";
+            runOnUiThread(() -> webView.evaluateJavascript(js, null));
+        });
     }
 
     // ---------- JavaScript bridge (window.AndroidNfc) ----------
@@ -196,9 +365,9 @@ public class MainActivity extends Activity {
         public boolean isEnabled() { return nfcAdapter != null && nfcAdapter.isEnabled(); }
 
         @JavascriptInterface
-        public void changeServer() { runOnUiThread(() -> promptForServer(true)); }
+        public void changeServer() { runOnUiThread(() -> showSettings()); }
 
         @JavascriptInterface
-        public void retry() { runOnUiThread(() -> webView.loadUrl(savedUrl())); }
+        public void saveCabinet(String requestId, String payloadJson) { handleSave(requestId, payloadJson); }
     }
 }

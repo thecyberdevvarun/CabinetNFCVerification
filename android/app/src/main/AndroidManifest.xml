@@ -8,7 +8,6 @@
     <application
         android:label="Cabinet Validation"
         android:allowBackup="false"
-        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity

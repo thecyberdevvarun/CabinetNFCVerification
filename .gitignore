@@ -40,3 +40,6 @@ desktop.ini
 # Temp / coverage
 *.tmp
 coverage/
+
+# Web app copied into the APK at build time
+android/app/src/main/assets/www/
