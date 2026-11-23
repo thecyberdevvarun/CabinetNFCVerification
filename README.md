@@ -1,136 +1,268 @@
-# Refrigerator Cabinet Validation System
+# Refrigerator Cabinet NFC Validation System
 
-Starter application using React + Tailwind CSS, Node.js + Express, and Microsoft SQL Server.
+A factory-floor application that verifies refrigerator cabinets by scanning a **foaming barcode** and two **NFC cards** (inner and outer), and records only cabinets whose two card values match. It runs as a web app on laptops and as a **standalone Android app** on a Zebra TC22 industrial handheld, using the device's built-in barcode scanner and NFC reader.
 
-## Decisions implemented
-- Two fixed workstations: `FREEZER_PRE` and `FREEZER_POST`.
-- No login, logout, signup, or user accounts.
-- After saving, remain on the selected workstation and reset for the next cabinet.
-- Each foaming barcode can be verified once per area: one record in `FREEZER_PRE` and one in `FREEZER_POST` (SQL unique constraint on `foaming_barcode` + `area`).
-- Barcode format: `F4` followed by exactly 13 digits.
-- NFC values are compared exactly after trimming whitespace.
-- Records are inserted only after successful validation and manual Save.
-- NFC cards are read directly by the Zebra TC22's built-in NFC reader through Chrome (Web NFC). Keyboard-wedge input still works for desktop PCs.
-- The Inner/Outer comparison and the database use the 20-digit serial stored on the card. The card UID is not compared or stored, because two different cards have different UIDs.
+> **Repo description (short):** Factory cabinet validation system: scan a foaming barcode plus inner and outer NFC cards, auto-save matched cabinets to SQL Server, and block mismatches. React + Node.js web app and a standalone Android (Zebra TC22) app with native NFC.
 
-## Prerequisites
-- Node.js 20+
-- Microsoft SQL Server (local or network server)
-- SQL Server Management Studio or another SQL client
+---
 
-## 1. Create the database
-Run `database/schema.sql` in SQL Server Management Studio, in the database named by `DB_DATABASE` in `backend/.env`. It creates `dbo.cabinet_nfc_verification`.
+## Table of contents
 
-Note: the Inner NFC column is named `inner_ncf` in the table (as supplied). The backend uses that exact name.
+1. [Problem and solution](#problem-and-solution)
+2. [Key features](#key-features)
+3. [How it works](#how-it-works)
+4. [Architecture](#architecture)
+5. [Tech stack](#tech-stack)
+6. [Project structure](#project-structure)
+7. [Database](#database)
+8. [Validation rules](#validation-rules)
+9. [NFC and barcode reading](#nfc-and-barcode-reading)
+10. [API reference](#api-reference)
+11. [Setup: web version](#setup-web-version)
+12. [Setup: standalone Android app](#setup-standalone-android-app)
+13. [Security notes](#security-notes)
+14. [Known limitations and next steps](#known-limitations-and-next-steps)
+15. [What this project demonstrates](#what-this-project-demonstrates)
 
-## 2. Start backend
-```bash
-cd backend
-npm install
+---
+
+## Problem and solution
+
+Each refrigerator cabinet carries two NFC cards that must hold the **same value**. If the values differ, the cabinet has two different cards and is defective. Checking this by hand is slow and error-prone.
+
+This system lets an operator scan the cabinet once and get an immediate answer:
+
+- **Values match:** the record is saved automatically and a success toast appears.
+- **Values differ:** a blocking **NOT MATCHED** popup appears and stays open until the operator closes it. Nothing is saved.
+
+Matched cabinets are stored in SQL Server with the area (`FREEZER_PRE` or `FREEZER_POST`), so each cabinet is verified once per area and the data is available for date-wise reports.
+
+## Key features
+
+- **Strict scan sequence:** Foaming Barcode, then Inner NFC, then Outer NFC. Steps cannot be skipped.
+- **Auto-save on match** with a success toast; no manual save step.
+- **Blocking "NOT MATCHED" popup** on mismatch. It stays until closed, ignores further scans while open, and cannot be dismissed accidentally by a scanner's Enter key.
+- **Same-card protection:** tapping the Inner card again as the Outer card is rejected.
+- **Two fixed workstations:** Freezer Pre and Freezer Post.
+- **One record per barcode per area**, enforced by a SQL unique constraint (also covers concurrent saves).
+- **Retry on failure:** if a save fails (network or database), scanned values are kept and a RETRY SAVE button appears.
+- **Double validation:** the same rules run in the UI and again on the server (Node backend or Android app), so the client is never trusted.
+- **Native NFC on Android:** the APK reads cards with the TC22's built-in reader; no PC reader program is needed.
+- **Standalone APK:** the web UI is bundled in the app and it writes directly to SQL Server. No intermediate server is required on the tablet.
+- **Keyboard-wedge friendly:** USB scanners and readers that type into a field also work.
+- **Factory-friendly UI:** large inputs, clear status colors, no on-screen keyboard popping up on the handheld, screen kept awake.
+- **CI-built APK:** a GitHub Actions workflow builds the web app and the APK automatically.
+
+## How it works
+
 ```
-Copy `.env.example` to `.env` and set the SQL Server credentials and connection details. For a named SQL Server instance, configure the correct server/instance connection supported by your environment; the starter uses host plus port.
-
-```bash
-npm run dev
+Scan Foaming Barcode  ->  Tap Inner NFC  ->  Tap Outer NFC
+                                                  |
+                                       Inner value == Outer value?
+                                        /                       \
+                                     YES                         NO
+                                      |                           |
+                          Save to SQL Server              "NOT MATCHED" popup
+                          Success toast                   (stays until Close)
+                          Form resets                     Nothing saved, form resets
 ```
-API: `http://localhost:5000`
-Health check: `http://localhost:5000/api/health`
 
-## 3. Start frontend
-In another terminal:
-```bash
-cd frontend
-npm install
-npm run dev
+1. The operator picks a workstation (Freezer Pre or Freezer Post).
+2. The Foaming Barcode field is focused. The barcode must be `F4` followed by 13 digits.
+3. The Inner NFC card is tapped, then the Outer NFC card.
+4. When the Outer value arrives, the app compares it with the Inner value and either saves or shows the popup.
+5. After a save, the form clears and focus returns to the barcode field for the next cabinet.
+
+## Architecture
+
+The same React UI runs in two modes.
+
+```mermaid
+flowchart LR
+    subgraph Laptop["Laptop / browser"]
+        UI1["React UI"] -->|HTTP /api| API["Node.js + Express API"]
+        API -->|mssql| DB[("SQL Server")]
+    end
+    subgraph TC22["Zebra TC22 (standalone APK)"]
+        UI2["React UI (bundled in APK)"] <-->|JS bridge| NATIVE["Android app (Java)"]
+        NATIVE -->|NFC reader| CARDS(["NFC cards"])
+        NATIVE -->|JDBC / jTDS| DB
+    end
+    SCANNER["Barcode scanner (DataWedge)"] -->|keystrokes| UI2
 ```
-Open the Vite URL shown in the terminal (normally `http://localhost:5173`).
 
-## API
-`POST /api/cabinet-scans`
+- **Web mode:** React talks to the Express API, which validates and inserts using parameterized SQL.
+- **Android mode:** the page is served from the APK's assets inside a WebView. A JavaScript bridge delivers NFC taps to the page and accepts save requests, which the Java layer validates and writes to SQL Server over JDBC. The UI code is the same; only `api.js` and the NFC hook switch behavior when the bridge is present.
+
+## Tech stack
+
+| Layer              | Technology                                                   |
+| ------------------ | ------------------------------------------------------------ |
+| Frontend           | React 18, Vite, Tailwind CSS, Axios, lucide-react            |
+| Backend (web mode) | Node.js, Express, `mssql`                                    |
+| Database           | Microsoft SQL Server                                         |
+| Android app        | Java, Android WebView, `NfcAdapter` reader mode, jTDS (JDBC) |
+| NFC (browser)      | Web NFC API (Chrome on Android, HTTPS only)                  |
+| Barcode (handheld) | Zebra DataWedge keystroke output                             |
+| Build / CI         | Gradle, GitHub Actions                                       |
+| Hardware           | Zebra TC22 (built-in barcode scanner and NFC)                |
+
+## Project structure
+
+```
+.
+├── .github/workflows/build-apk.yml      # builds the web app and the APK in CI
+├── android/                             # standalone Android app
+│   └── app/src/main/
+│       ├── AndroidManifest.xml
+│       └── java/com/factory/cabinetvalidation/MainActivity.java
+├── backend/                             # Express API (web mode)
+│   └── src/
+│       ├── config/db.js                 # SQL Server connection pool
+│       ├── controllers/cabinetController.js
+│       ├── middleware/errorHandler.js
+│       ├── routes/cabinetRoutes.js
+│       ├── services/cabinetService.js   # parameterized INSERT, duplicate handling
+│       ├── utils/nfc.js                 # NFC value normalization
+│       └── server.js                    # API + serves the built web app
+├── database/schema.sql                  # dbo.cabinet_nfc_verification
+├── frontend/                            # React app
+│   └── src/
+│       ├── hooks/useNfcReader.js        # native bridge or Web NFC
+│       ├── pages/WorkstationPage.jsx    # scan workflow, toast, popup
+│       ├── services/api.js              # HTTP save or native save
+│       ├── utils/nfc.js
+│       └── App.jsx                      # workstation selection
+└── .gitignore
+```
+
+## Database
+
+Table `dbo.cabinet_nfc_verification` (see `database/schema.sql`):
+
+| Column              | Type            | Notes                                                  |
+| ------------------- | --------------- | ------------------------------------------------------ |
+| `id`                | BIGINT IDENTITY | Primary key                                            |
+| `foaming_barcode`   | VARCHAR(15)     | `F4` + 13 digits                                       |
+| `inner_ncf`         | VARCHAR(255)    | Inner NFC value (column name as in the existing table) |
+| `outer_nfc`         | VARCHAR(255)    | Outer NFC value                                        |
+| `area`              | VARCHAR(20)     | `FREEZER_PRE` or `FREEZER_POST`                        |
+| `validation_status` | VARCHAR(20)     | Always `MATCHED` (check constraint)                    |
+| `created_at`        | DATETIME2(0)    | Defaults to `SYSDATETIME()`                            |
+
+Constraints enforce the business rules at the database level:
+
+- `UNIQUE (foaming_barcode, area)`: a barcode can be verified once in each area.
+- `CHECK (area IN ('FREEZER_PRE', 'FREEZER_POST'))`
+- `CHECK (validation_status = 'MATCHED')`: failed validations can never be stored.
+- An index on `created_at` supports date-wise reports.
+
+## Validation rules
+
+| Rule                                                                            | Where enforced                                         |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Barcode matches `^F4\d{13}$` (case-insensitive input, normalized to upper case) | UI, server, Android app                                |
+| Scan order: barcode, then Inner, then Outer                                     | UI                                                     |
+| Inner and Outer NFC values must be identical (compared after trimming)          | UI, server, Android app, and indirectly the data model |
+| Inner and Outer must be two different physical cards                            | UI                                                     |
+| Area must be `FREEZER_PRE` or `FREEZER_POST`                                    | UI, server, Android app, database                      |
+| One record per barcode per area                                                 | Database unique constraint (HTTP 409 on duplicate)     |
+
+NFC values are the **20-digit serial** stored in the card's NDEF text record. The card's hardware UID is used only to detect the same card being tapped twice; it is not compared or stored.
+
+## NFC and barcode reading
+
+- **Android app (recommended):** `NfcAdapter` reader mode reads the card, extracts the 20-digit serial from the NDEF data, and pushes it to the page through a JavaScript bridge.
+- **Chrome on Android:** the Web NFC API reads the same data, but requires an HTTPS page and a one-time permission.
+- **Desktop PC readers:** a reader that types into the focused field (keyboard wedge) works with the same input fields.
+- **Barcode:** the Zebra DataWedge keystroke output types the barcode into the focused field and sends Enter.
+
+## API reference
+
+### `POST /api/cabinet-scans`
+
+Request:
 
 ```json
 {
   "foamingBarcode": "F41234567890123",
-  "innerNfc": "NFC123456",
-  "outerNfc": "NFC123456",
+  "innerNfc": "12345678901234567890",
+  "outerNfc": "12345678901234567890",
   "area": "FREEZER_PRE"
 }
 ```
 
-The API validates all fields again. SQL Server's unique constraint rejects a barcode already saved in the same area (returns HTTP 409), including concurrent requests. The same barcode may still be saved once in the other area.
+| Status | Meaning                                                                             |
+| ------ | ----------------------------------------------------------------------------------- |
+| `201`  | Saved                                                                               |
+| `400`  | Validation failed (barcode format, missing or mismatching NFC values, invalid area) |
+| `409`  | Barcode already verified in this area                                               |
+| `500`  | Server or database error                                                            |
 
-## Notes before production
-- This starter does not include authentication by design. Restrict network access to the factory LAN and the authorized workstation devices; without authentication, anyone who can reach the API can submit data.
-- Confirm whether the barcode pattern and NFC case sensitivity match actual production data.
-- Confirm the NFC reader model and whether it types into the focused field and appends Enter. If not, add its vendor SDK/bridge integration.
-- Test scanner timing, duplicate submissions, SQL connectivity, and workstation behavior on the actual production PCs before go-live.
+Response body: `{ "success": true | false, "message": "..." }`
 
-## Zebra TC22 (Android) setup
+### `GET /api/health`
 
-### How it works
-- **Barcode:** the TC22 scanner types the barcode into the focused field through Zebra DataWedge.
-- **NFC:** the app reads the card with Chrome's Web NFC API. The operator holds the card against the back of the device. The app takes the 20-digit serial from the card's NDEF text record (the same data `nfc_tag_new.exe` extracts) and fills Inner NFC, then Outer NFC.
-- The old PC reader (`nfc_tag_new.exe`) is not needed on the TC22 and cannot run on Android. It can stay in use on Windows PCs.
+Returns API and database connection status.
 
-### Requirements
-1. Chrome on the TC22 (Web NFC is not available in other browsers or WebViews).
-2. NFC switched on in Android Settings.
-3. The page must be opened over **HTTPS**. Web NFC does not work on plain `http://` addresses.
+## Setup: web version
 
-### HTTPS
-The frontend now serves HTTPS (self-signed certificate) and proxies `/api` to the backend, so the tablet only talks to one address:
-```bash
-cd frontend
-npm install
-npm run dev        # or: npm run build && npm run preview
-```
-Open `https://<server-PC-IP>:5173` on the TC22. Keep the backend running on the server PC (port 5000). If the backend is on another machine, start the frontend with `API_TARGET=http://<backend-ip>:5000`.
+**Prerequisites:** Node.js 20+, SQL Server, and a SQL client such as SQL Server Management Studio.
 
-A self-signed certificate shows a warning in Chrome. Preferred fix: install your company's CA certificate on the TC22 (or use a certificate from your IT team). Fallback: in Chrome open `chrome://flags`, enable **Insecure origins treated as secure**, add the server address (for example `http://192.168.1.50:5173`), and relaunch Chrome. Test NFC on the actual device before go-live.
+1. **Create the table:** run `database/schema.sql` in your database.
+2. **Backend:**
+   ```bash
+   cd backend
+   npm install
+   cp .env.example .env     # set DB_SERVER, DB_DATABASE, DB_USER, DB_PASSWORD, DB_PORT
+   npm run dev              # http://localhost:5000
+   ```
+3. **Frontend (development):**
+   ```bash
+   cd frontend
+   npm install
+   npm run dev              # https://localhost:5173, proxies /api to the backend
+   ```
+4. **Single-server mode:** build the frontend and the backend serves it on port 5000.
+   ```bash
+   cd frontend && npm run build
+   cd ../backend && npm start
+   ```
 
-### DataWedge (barcode scanner)
-Create a profile for Chrome (`com.android.chrome`):
-- Barcode input: enabled, with Code 128 and any other symbologies your Foaming labels use.
-- Keystroke output: enabled, with **Send Enter key** after the data.
-- Fields use `inputMode="none"`, so the on-screen keyboard does not pop up when a field gets focus.
+## Setup: standalone Android app
 
-### Operator flow
-1. Open the workstation. Tap **Enable NFC reader** once (it starts automatically after permission is granted).
-2. Scan the Foaming Barcode with the scanner button.
-3. Tap the Inner NFC card, then the Outer NFC card.
-4. If they match, press **SAVE CABINET**. If not, tap the Outer card again, or press **Clear & rescan**.
-- Tapping the same card for both Inner and Outer is rejected. To allow it for testing, set `REJECT_SAME_CARD = false` in `frontend/src/pages/WorkstationPage.jsx`.
+The APK contains the UI and talks to SQL Server directly. No PC server is needed on the tablet.
 
-## Android APK (Cabinet Validation app for the TC22)
+1. **Prepare SQL Server:** enable TCP/IP and SQL logins, open the port (1433 by default) in the firewall, and make sure the TC22 is on the same network. Create a limited login for the tablets:
+   ```sql
+   CREATE LOGIN cabinet_app WITH PASSWORD = 'choose-a-strong-password';
+   USE CabinetValidation;   -- your database name
+   CREATE USER cabinet_app FOR LOGIN cabinet_app;
+   GRANT INSERT ON dbo.cabinet_nfc_verification TO cabinet_app;
+   ```
+2. **Build the APK:** push the repo to GitHub, open **Actions**, run **Build Android APK**, and download `app-debug.apk` from the run's artifacts. (To build locally: build the frontend, copy `frontend/dist` to `android/app/src/main/assets/www`, then run `gradle assembleDebug` in `android/`.)
+3. **Install:** copy the APK to the TC22 and open it. Allow installing from the source if prompted. Turn on NFC in Android settings.
+4. **Configure:** on first launch the **Database settings** window opens. Enter the server address (or `HOST\INSTANCE`), port, database, and SQL login, then tap **Save & test**.
+5. **DataWedge:** create a profile for the package `com.factory.cabinetvalidation` with barcode input enabled for your label type and keystroke output with **Send Enter key**.
 
-The `android/` folder is a small Android app that opens this web app full-screen and reads NFC cards with the TC22's built-in reader. Compared with Chrome it needs no HTTPS setup and no browser permission prompts.
+## Security notes
 
-### Step A: run the server (on the server PC, once)
-```bash
-cd frontend
-npm install
-npm run build        # builds the web app into frontend/dist
-cd ../backend
-npm install
-npm start            # serves the web app AND the API on port 5000
-```
-Find the PC's IP address (`ipconfig`, for example `192.168.1.50`). The app is then at `http://192.168.1.50:5000`. Allow port 5000 through Windows Firewall. Keep SQL Server and `backend/.env` configured as described above.
+- No login system: the app is designed for fixed factory workstations. Restrict network access to the factory LAN.
+- The Android app stores database settings, including the SQL password, privately on the device. Use a dedicated SQL login with `INSERT`-only permission on the one table, not an administrator account.
+- All SQL uses parameterized queries.
+- Debug-signed APK: suitable for internal sideloading; use a release signing key and an MDM for wider rollout.
 
-### Step B: get the APK
-**Option 1: no Android Studio (GitHub builds it for you)**
-1. Create a free GitHub account and a new private repository.
-2. Upload the whole `cabinet-validation` folder contents to it (the `.github` folder must be included).
-3. Open the repository, click **Actions**, then **Build Android APK**, then **Run workflow**.
-4. When it finishes (about 3 to 5 minutes), open the run and download the **cabinet-validation-apk** artifact. Unzip it to get `app-debug.apk`.
+## Known limitations and next steps
 
-**Option 2: Android Studio**
-Open the `android` folder in Android Studio, then **Build > Build Bundle(s) / APK(s) > Build APK(s)**. The file is `android/app/build/outputs/apk/debug/app-debug.apk`.
+- The Android app uses the jTDS driver, which can fail if the server forces encrypted connections or accepts only TLS 1.2 or newer. A newer driver or a small API service would remove this limitation.
+- Real hardware validation is needed for each site: card format (NDEF text with a 20-digit serial), scanner symbology, Wi-Fi coverage, and database access from the handheld.
+- Possible improvements: offline queue with later sync, operator ID and audit trail, reporting dashboard, release signing and over-the-air updates, and automated tests.
 
-### Step C: install on the TC22
-1. Copy `app-debug.apk` to the TC22 (USB cable, or email/Drive/MDM).
-2. On the TC22 open the file (Files app) and tap it. If asked, allow installing from this source.
-3. Open **Cabinet Validation**. On first start enter the server address, for example `http://192.168.1.50:5000`, and tap **Connect**. The address is remembered. Change it later from **Server settings** on the first screen.
-4. Turn on NFC in Android Settings.
+## What this project demonstrates
 
-### DataWedge (barcode scanner) for the app
-Create or edit a DataWedge profile and associate it with the package `com.factory.cabinetvalidation` (activity `*`): barcode input enabled for your Foaming label type, keystroke output enabled, with **Send Enter key** after the data.
+- Designing an end-to-end production workflow with strict sequencing, validation, and failure handling.
+- Full-stack development: React and Tailwind UI, Node.js and Express API, SQL Server schema with constraints enforcing business rules.
+- Hardware integration: NFC (native Android and Web NFC) and barcode scanning on an industrial handheld.
+- Android development: WebView hosting, JavaScript-to-native bridge, JDBC database access from the device.
+- Defensive design: server-side re-validation, parameterized SQL, unique-constraint duplicate protection, retry without data loss, and a mistake-proof blocking popup.
+- DevOps: GitHub Actions pipeline that builds the web app and packages the APK.
