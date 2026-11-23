@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+frontend/dist/
+android/build/
+android/app/build/
+android/.gradle/
+android/.idea/
+android/captures/
+android/.cxx/
+*.apk
+*.aab
+
+# Environment files (keep the .example files)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+nfc_reader.log
+
+# Android local config and signing keys
+local.properties
+*.jks
+*.keystore
+
+# Editor / IDE
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp / coverage
+*.tmp
+coverage/
