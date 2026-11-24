@@ -318,7 +318,8 @@ public class MainActivity extends Activity {
             String outerMac = in.optString("outerNfcMac", "").trim().toUpperCase();
             String area = in.optString("area", "");
 
-            if (!BARCODE.matcher(barcode).matches())
+            // The foaming barcode is scanned only in Freezer Post; Freezer Pre stores it blank (NULL).
+            if (area.equals("FREEZER_POST") && !BARCODE.matcher(barcode).matches())
                 return result(false, 400, "Invalid Foaming Barcode. Expected F4 followed by 13 digits.");
             if (inner.isEmpty() || outer.isEmpty())
                 return result(false, 400, "Both NFC values are required.");
@@ -335,7 +336,8 @@ public class MainActivity extends Activity {
             try (Connection connection = openConnection();
                  PreparedStatement statement = connection.prepareStatement(
                          "INSERT INTO dbo.cabinet_nfc_verification (foaming_barcode, inner_ncf, outer_nfc, inner_nfc_mac, outer_nfc_mac, area) VALUES (?, ?, ?, ?, ?, ?)")) {
-                statement.setString(1, barcode);
+                if (area.equals("FREEZER_POST")) statement.setString(1, barcode);
+                else statement.setNull(1, Types.VARCHAR);
                 statement.setString(2, inner);
                 statement.setString(3, outer);
                 if (innerMac.isEmpty()) statement.setNull(4, Types.VARCHAR); else statement.setString(4, innerMac);

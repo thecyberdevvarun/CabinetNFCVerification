@@ -26,11 +26,15 @@ const initial = {
 const normalizeBarcode = (value) => value.trim().toUpperCase();
 
 export default function WorkstationPage({ freezerType, onBack }) {
+  // The foaming barcode is scanned only in Freezer Post. Freezer Pre goes straight to the NFC cards.
+  const needsBarcode = freezerType === "FREEZER_POST";
+  const barcodeOk = (value) => !needsBarcode || BARCODE_RE.test(value);
+  const readyMessage = needsBarcode
+    ? "Ready for Foaming Barcode scan."
+    : "Ready. Tap the Inner NFC card.";
+
   const [values, setValues] = useState(initial);
-  const [status, setStatus] = useState({
-    type: "idle",
-    message: "Ready for Foaming Barcode scan.",
-  });
+  const [status, setStatus] = useState({ type: "idle", message: readyMessage });
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
   const [mismatch, setMismatch] = useState(false); // "Not Matched" popup
@@ -63,7 +67,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
   // Keep focus on the field that is waiting for the next scan.
   useEffect(() => {
     if (mismatch) return;
-    if (!BARCODE_RE.test(values.foamingBarcode)) barcodeRef.current?.focus();
+    if (!barcodeOk(values.foamingBarcode)) barcodeRef.current?.focus();
     else if (!values.innerNfc.trim()) innerRef.current?.focus();
     else if (!values.outerNfc.trim()) outerRef.current?.focus();
   }, [values.foamingBarcode, values.innerNfc, values.outerNfc, mismatch]);
@@ -93,7 +97,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
     mismatchRef.current = false;
     setMismatch(false);
     resetAll();
-    setStatus({ type: "idle", message: "Ready for Foaming Barcode scan." });
+    setStatus({ type: "idle", message: readyMessage });
   }
 
   async function performSave() {
@@ -108,7 +112,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
     });
     try {
       await saveCabinet({
-        foamingBarcode: v.foamingBarcode,
+        foamingBarcode: needsBarcode ? v.foamingBarcode : "",
         innerNfc: normalizeNfc(v.innerNfc),
         outerNfc: normalizeNfc(v.outerNfc),
         innerNfcMac: v.innerMac,
@@ -138,7 +142,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
   function handleNfcTag({ uid, serial }) {
     if (savingRef.current || mismatchRef.current) return;
     const current = valuesRef.current;
-    if (!BARCODE_RE.test(current.foamingBarcode)) {
+    if (!barcodeOk(current.foamingBarcode)) {
       setStatus({
         type: "error",
         message: "Scan the Foaming Barcode first, then tap the NFC card.",
@@ -224,10 +228,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
 
   function handleClear() {
     resetAll();
-    setStatus({
-      type: "idle",
-      message: "Cleared. Ready for Foaming Barcode scan.",
-    });
+    setStatus({ type: "idle", message: `Cleared. ${readyMessage}` });
   }
 
   const enterKey = (handler) => (e) => {
@@ -253,7 +254,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
       ref: innerRef,
       placeholder: "Tap Inner NFC card",
       onKeyDown: enterKey(handleInner),
-      disabled: !BARCODE_RE.test(values.foamingBarcode),
+      disabled: !barcodeOk(values.foamingBarcode),
     },
     {
       key: "outerNfc",
@@ -264,7 +265,12 @@ export default function WorkstationPage({ freezerType, onBack }) {
       onKeyDown: enterKey(handleOuter),
       disabled: !values.innerNfc.trim(),
     },
-  ];
+  ]
+    .filter((field) => needsBarcode || field.key !== "foamingBarcode")
+    .map((field, index) => ({
+      ...field,
+      step: String(index + 1).padStart(2, "0"),
+    }));
 
   const nfcStyles = {
     active: "border-green-200 bg-green-50 text-green-800",
@@ -315,10 +321,12 @@ export default function WorkstationPage({ freezerType, onBack }) {
               Do not use it.
             </p>
             <div className="mt-5 space-y-2 rounded-xl bg-slate-100 p-3 text-left text-sm">
-              <p>
-                <span className="font-bold">Foaming:</span>{" "}
-                {values.foamingBarcode}
-              </p>
+              {needsBarcode && (
+                <p>
+                  <span className="font-bold">Foaming:</span>{" "}
+                  {values.foamingBarcode}
+                </p>
+              )}
               <p className="break-all">
                 <span className="font-bold">Inner:</span> {values.innerNfc}
               </p>
@@ -371,7 +379,9 @@ export default function WorkstationPage({ freezerType, onBack }) {
           <div className="mb-5">
             <h3 className="text-lg font-bold">Scan cabinet identifiers</h3>
             <p className="mt-1 text-sm text-slate-500">
-              Scan the barcode, then tap the Inner card, then the Outer card.
+              {needsBarcode
+                ? "Scan the barcode, then tap the Inner card, then the Outer card."
+                : "Tap the Inner card, then the Outer card."}{" "}
               The record saves automatically when both cards match.
             </p>
           </div>

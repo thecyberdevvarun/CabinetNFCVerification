@@ -4,7 +4,8 @@
 CREATE TABLE dbo.cabinet_nfc_verification (
     id BIGINT IDENTITY(1,1) PRIMARY KEY,
 
-    foaming_barcode VARCHAR(15) NOT NULL,
+    -- Scanned only in FREEZER_POST. Blank (NULL) in FREEZER_PRE.
+    foaming_barcode VARCHAR(15) NULL,
     inner_ncf VARCHAR(255) NOT NULL,
     outer_nfc VARCHAR(255) NOT NULL,
 
@@ -20,18 +21,27 @@ CREATE TABLE dbo.cabinet_nfc_verification (
     created_at DATETIME2(0) NOT NULL
         DEFAULT (SYSDATETIME()),
 
-    -- One verification per barcode in each area
-    CONSTRAINT UQ_cabinet_barcode_area
-        UNIQUE (foaming_barcode, area),
-
     -- Only two permitted areas
     CONSTRAINT CK_cabinet_area
         CHECK (area IN ('FREEZER_PRE', 'FREEZER_POST')),
+
+    -- Barcode is required in FREEZER_POST and blank in FREEZER_PRE
+    CONSTRAINT CK_cabinet_barcode_by_area
+        CHECK (
+            (area = 'FREEZER_POST' AND foaming_barcode IS NOT NULL)
+            OR (area = 'FREEZER_PRE' AND foaming_barcode IS NULL)
+        ),
 
     -- Only successfully matched records can be saved
     CONSTRAINT CK_cabinet_status
         CHECK (validation_status = 'MATCHED')
 );
+GO
+
+-- One verification per barcode in each area (rows without a barcode are not limited)
+CREATE UNIQUE INDEX UQ_cabinet_barcode_area
+ON dbo.cabinet_nfc_verification (foaming_barcode, area)
+WHERE foaming_barcode IS NOT NULL;
 GO
 
 -- Index for date-wise verification reports
