@@ -11,12 +11,18 @@ import {
 } from "lucide-react";
 import { saveCabinet } from "../services/api";
 import { useNfcReader } from "../hooks/useNfcReader";
-import { normalizeNfc } from "../utils/nfc";
+import { normalizeNfc, extractNfcUid } from "../utils/nfc";
 
 const BARCODE_RE = /^F4\d{13}$/;
 // Inner and outer are two different physical cards. Reject the same card being tapped twice.
 const REJECT_SAME_CARD = true;
-const initial = { foamingBarcode: "", innerNfc: "", outerNfc: "" };
+const initial = {
+  foamingBarcode: "",
+  innerNfc: "",
+  outerNfc: "",
+  innerMac: "",
+  outerMac: "",
+};
 const normalizeBarcode = (value) => value.trim().toUpperCase();
 
 export default function WorkstationPage({ freezerType, onBack }) {
@@ -68,9 +74,9 @@ export default function WorkstationPage({ freezerType, onBack }) {
   }, [mismatch]);
 
   // ---------- Compare, then auto-save or show the popup ----------
-  function checkOuter(outerRaw) {
+  function checkOuter(outerRaw, outerUid = "") {
     const outer = normalizeNfc(outerRaw);
-    apply({ outerNfc: outer });
+    apply({ outerNfc: outer, outerMac: outerUid });
     if (normalizeNfc(valuesRef.current.innerNfc) === outer) {
       performSave();
     } else {
@@ -105,6 +111,8 @@ export default function WorkstationPage({ freezerType, onBack }) {
         foamingBarcode: v.foamingBarcode,
         innerNfc: normalizeNfc(v.innerNfc),
         outerNfc: normalizeNfc(v.outerNfc),
+        innerNfcMac: v.innerMac,
+        outerNfcMac: v.outerMac,
         area: freezerType,
       });
       resetAll();
@@ -147,7 +155,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
     }
     if (!current.innerNfc.trim()) {
       innerUidRef.current = uid;
-      apply({ innerNfc: serial });
+      apply({ innerNfc: serial, innerMac: uid });
       setStatus({
         type: "scanning",
         message: "Inner NFC captured. Tap the Outer NFC card.",
@@ -162,7 +170,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
         });
         return;
       }
-      checkOuter(serial);
+      checkOuter(serial, uid);
       return;
     }
     setStatus({
@@ -200,7 +208,8 @@ export default function WorkstationPage({ freezerType, onBack }) {
   }
   function handleInner(value) {
     const inner = normalizeNfc(value);
-    apply({ innerNfc: inner });
+    const innerMac = extractNfcUid(value);
+    apply({ innerNfc: inner, innerMac });
     innerUidRef.current = "";
     if (inner)
       setStatus({
@@ -210,7 +219,7 @@ export default function WorkstationPage({ freezerType, onBack }) {
   }
   function handleOuter(value) {
     if (!value.trim() || savingRef.current || mismatchRef.current) return;
-    checkOuter(value);
+    checkOuter(value, extractNfcUid(value));
   }
 
   function handleClear() {

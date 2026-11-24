@@ -8,6 +8,10 @@ CREATE TABLE dbo.cabinet_nfc_verification (
     inner_ncf VARCHAR(255) NOT NULL,
     outer_nfc VARCHAR(255) NOT NULL,
 
+    -- Card hardware IDs (UID), e.g. 04:A1:B2:C3:D4:E5:F6
+    inner_nfc_mac VARCHAR(50) NULL,
+    outer_nfc_mac VARCHAR(50) NULL,
+
     area VARCHAR(20) NOT NULL,
 
     validation_status VARCHAR(20) NOT NULL

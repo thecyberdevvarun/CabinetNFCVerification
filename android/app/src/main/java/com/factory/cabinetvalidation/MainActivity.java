@@ -34,6 +34,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.Collections;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -54,6 +55,7 @@ public class MainActivity extends Activity {
 
     private static final Pattern SERIAL = Pattern.compile("\\d{20}");
     private static final Pattern BARCODE = Pattern.compile("^F4\\d{13}$");
+    private static final Pattern CARD_ID = Pattern.compile("^[0-9A-F]{2}(?::[0-9A-F]{2})*$");
     private static final Pattern NFC_PAYLOAD =
             Pattern.compile("^(?:[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2})*;)?(\\d{20})$");
 
@@ -312,6 +314,8 @@ public class MainActivity extends Activity {
             String barcode = in.optString("foamingBarcode", "").trim().toUpperCase();
             String inner = normalizeNfc(in.optString("innerNfc", ""));
             String outer = normalizeNfc(in.optString("outerNfc", ""));
+            String innerMac = in.optString("innerNfcMac", "").trim().toUpperCase();
+            String outerMac = in.optString("outerNfcMac", "").trim().toUpperCase();
             String area = in.optString("area", "");
 
             if (!BARCODE.matcher(barcode).matches())
@@ -320,6 +324,9 @@ public class MainActivity extends Activity {
                 return result(false, 400, "Both NFC values are required.");
             if (!inner.equals(outer))
                 return result(false, 400, "Inner NFC and Outer NFC do not match.");
+            if ((!innerMac.isEmpty() && (!CARD_ID.matcher(innerMac).matches() || innerMac.length() > 50))
+                    || (!outerMac.isEmpty() && (!CARD_ID.matcher(outerMac).matches() || outerMac.length() > 50)))
+                return result(false, 400, "Invalid NFC card ID format.");
             if (!area.equals("FREEZER_PRE") && !area.equals("FREEZER_POST"))
                 return result(false, 400, "Invalid area. Select Freezer Pre or Freezer Post.");
             if (!isConfigured())
@@ -327,11 +334,13 @@ public class MainActivity extends Activity {
 
             try (Connection connection = openConnection();
                  PreparedStatement statement = connection.prepareStatement(
-                         "INSERT INTO dbo.cabinet_nfc_verification (foaming_barcode, inner_ncf, outer_nfc, area) VALUES (?, ?, ?, ?)")) {
+                         "INSERT INTO dbo.cabinet_nfc_verification (foaming_barcode, inner_ncf, outer_nfc, inner_nfc_mac, outer_nfc_mac, area) VALUES (?, ?, ?, ?, ?, ?)")) {
                 statement.setString(1, barcode);
                 statement.setString(2, inner);
                 statement.setString(3, outer);
-                statement.setString(4, area);
+                if (innerMac.isEmpty()) statement.setNull(4, Types.VARCHAR); else statement.setString(4, innerMac);
+                if (outerMac.isEmpty()) statement.setNull(5, Types.VARCHAR); else statement.setString(5, outerMac);
+                statement.setString(6, area);
                 statement.executeUpdate();
             }
             return result(true, 201, "Cabinet saved successfully.");
