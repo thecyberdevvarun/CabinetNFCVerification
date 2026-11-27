@@ -329,7 +329,7 @@ public class MainActivity extends Activity {
             if ((!innerMac.isEmpty() && (!CARD_ID.matcher(innerMac).matches() || innerMac.length() > 50))
                     || (!outerMac.isEmpty() && (!CARD_ID.matcher(outerMac).matches() || outerMac.length() > 50)))
                 return result(false, 400, "Invalid NFC card ID format.");
-            if (area.equals("FREEZER_POST") && outerMac.isEmpty())
+            if (area.equals("FREEZER_PRE") && outerMac.isEmpty())
                 return result(false, 400, "Outer NFC card ID (UID) is missing. Tap the Outer card with the NFC reader.");
             if (!area.equals("FREEZER_PRE") && !area.equals("FREEZER_POST"))
                 return result(false, 400, "Invalid area. Select Freezer Pre or Freezer Post.");
@@ -337,30 +337,20 @@ public class MainActivity extends Activity {
                 return result(false, 500, "Database is not set up. Tap \"Database settings\" on the first screen.");
 
             try (Connection connection = openConnection()) {
-                connection.setAutoCommit(false);
-                try {
-                    try (PreparedStatement statement = connection.prepareStatement(
-                            "INSERT INTO dbo.cabinet_nfc_verification (foaming_barcode, inner_ncf, outer_nfc, inner_nfc_mac, outer_nfc_mac, area) VALUES (?, ?, ?, ?, ?, ?)")) {
-                        if (area.equals("FREEZER_POST")) statement.setString(1, barcode);
-                        else statement.setNull(1, Types.VARCHAR);
-                        statement.setString(2, inner);
-                        statement.setString(3, outer);
-                        if (innerMac.isEmpty()) statement.setNull(4, Types.VARCHAR); else statement.setString(4, innerMac);
-                        if (outerMac.isEmpty()) statement.setNull(5, Types.VARCHAR); else statement.setString(5, outerMac);
-                        statement.setString(6, area);
-                        statement.executeUpdate();
-                    }
-                    if (area.equals("FREEZER_POST")) {
-                        String linkError = linkToMaterialBarcode(connection, barcode, outerMac + "/" + outer);
-                        if (linkError != null) {
-                            connection.rollback();
-                            return result(false, 404, linkError);
-                        }
-                    }
-                    connection.commit();
-                } catch (SQLException e) {
-                    try { connection.rollback(); } catch (SQLException ignored) { }
-                    throw e;
+                if (area.equals("FREEZER_PRE")) {
+                    String duplicate = findUsedNfc(connection, outerMac + "/" + outer);
+                    if (duplicate != null) return result(false, 409, duplicate);
+                }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "INSERT INTO dbo.cabinet_nfc_verification (foaming_barcode, inner_ncf, outer_nfc, inner_nfc_mac, outer_nfc_mac, area) VALUES (?, ?, ?, ?, ?, ?)")) {
+                    if (area.equals("FREEZER_POST")) statement.setString(1, barcode);
+                    else statement.setNull(1, Types.VARCHAR);
+                    statement.setString(2, inner);
+                    statement.setString(3, outer);
+                    if (innerMac.isEmpty()) statement.setNull(4, Types.VARCHAR); else statement.setString(4, innerMac);
+                    if (outerMac.isEmpty()) statement.setNull(5, Types.VARCHAR); else statement.setString(5, outerMac);
+                    statement.setString(6, area);
+                    statement.executeUpdate();
                 }
             }
             return result(true, 201, "Cabinet saved successfully.");
@@ -376,44 +366,19 @@ public class MainActivity extends Activity {
         }
     }
 
-    // Freezer Post only: ProcessStageLabel.PSNo -> MaterialBarcode.Serial2 = "<outer card ID>/<outer value>".
-    // Returns an error message (caller rolls back) or null when exactly one row was updated.
-    private static String linkToMaterialBarcode(Connection connection, String barcode, String serial2) throws SQLException {
-        if (serial2.length() > 100) return "Outer NFC ID and value are too long to store in MaterialBarcode.Serial2.";
-
-        long psNo = 0;
-        int count = 0;
-        try (PreparedStatement lookup = connection.prepareStatement(
-                "SELECT DISTINCT PSNo FROM ProcessStageLabel WHERE BarcodeNo = ? AND PSNo IS NOT NULL")) {
-            lookup.setString(1, barcode);
-            try (ResultSet rs = lookup.executeQuery()) {
-                while (rs.next()) { psNo = rs.getLong(1); count++; }
-            }
-        }
-        if (count == 0) return "Foaming Barcode " + barcode + " was not found in ProcessStageLabel. Cabinet not saved.";
-        if (count > 1) return "Foaming Barcode " + barcode + " matches more than one PSNo in ProcessStageLabel. Cabinet not saved.";
-
-        // The same Serial2 value must not already exist anywhere in MaterialBarcode.
+    // Freezer Pre only: the outer card's "<card ID>/<card value>" is stored in MaterialBarcode.Serial2 when a card is
+    // used on a body. If it is already there, this NFC card was used before: return a message with the body Serial.
+    private static String findUsedNfc(Connection connection, String serial2) throws SQLException {
         try (PreparedStatement check = connection.prepareStatement(
-                "SELECT TOP 1 BarcodeNo FROM MaterialBarcode WHERE Serial2 = ?")) {
+                "SELECT TOP 1 Serial FROM MaterialBarcode WHERE Serial2 = ?")) {
             check.setString(1, serial2);
             try (ResultSet rs = check.executeQuery()) {
                 if (rs.next()) {
-                    return "This NFC value (" + serial2 + ") is already stored in MaterialBarcode (BarcodeNo "
-                            + rs.getLong(1) + "). Cabinet not saved.";
+                    return "Duplicate NFC! This NFC card (" + serial2 + ") was already used on body serial number "
+                            + rs.getString(1) + ". Cabinet not saved.";
                 }
             }
         }
-
-        int updated;
-        try (PreparedStatement update = connection.prepareStatement(
-                "UPDATE MaterialBarcode SET Serial2 = ? WHERE DocNo = ? AND Type = 400")) {
-            update.setString(1, serial2);
-            update.setLong(2, psNo);
-            updated = update.executeUpdate();
-        }
-        if (updated == 0) return "No MaterialBarcode row found for PSNo " + psNo + " with Type 400. Cabinet not saved.";
-        if (updated > 1) return "More than one MaterialBarcode row found for PSNo " + psNo + " with Type 400. Cabinet not saved.";
         return null;
     }
 

@@ -7,79 +7,30 @@ const AREA_LABELS = {
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode });
 
-// Freezer Post only:
-//   1. ProcessStageLabel: find PSNo for the foaming barcode
-//   2. MaterialBarcode:   make sure the value is not already stored, then set Serial2 = "<outer card ID>/<outer card value>" where DocNo = PSNo and Type = 400
-// Runs inside the same transaction as the verification INSERT, so everything is saved or nothing is.
-async function linkToMaterialBarcode(transaction, data) {
+// Freezer Pre only: the outer card's "<card ID>/<card value>" is stored in MaterialBarcode.Serial2 when a card
+// is used on a body. If it is already there, this NFC card was used before: report the body (Serial column).
+async function assertNfcNotUsedBefore(pool, data) {
   const serial2 = `${data.outerMac}/${data.outerNfc}`;
-  if (serial2.length > 100) {
-    throw httpError(
-      400,
-      "Outer NFC ID and value are too long to store in MaterialBarcode.Serial2.",
-    );
-  }
-
-  const lookup = await new sql.Request(transaction)
-    .input("barcode", sql.NVarChar(150), data.foamingBarcode)
-    .query(
-      "SELECT DISTINCT PSNo FROM ProcessStageLabel WHERE BarcodeNo = @barcode AND PSNo IS NOT NULL",
-    );
-  const psNos = lookup.recordset.map((row) => row.PSNo);
-  if (psNos.length === 0) {
-    throw httpError(
-      404,
-      `Foaming Barcode ${data.foamingBarcode} was not found in ProcessStageLabel. Cabinet not saved.`,
-    );
-  }
-  if (psNos.length > 1) {
+  const result = await pool
+    .request()
+    .input("serial2", sql.NVarChar(400), serial2)
+    .query("SELECT TOP 1 Serial FROM MaterialBarcode WHERE Serial2 = @serial2");
+  if (result.recordset.length > 0) {
     throw httpError(
       409,
-      `Foaming Barcode ${data.foamingBarcode} matches more than one PSNo in ProcessStageLabel. Cabinet not saved.`,
-    );
-  }
-  const psNo = psNos[0];
-
-  // The same Serial2 value must not already exist anywhere in MaterialBarcode.
-  const existing = await new sql.Request(transaction)
-    .input("serial2", sql.NVarChar(100), serial2)
-    .query(
-      "SELECT TOP 1 BarcodeNo FROM MaterialBarcode WHERE Serial2 = @serial2",
-    );
-  if (existing.recordset.length > 0) {
-    throw httpError(
-      409,
-      `This NFC value (${serial2}) is already stored in MaterialBarcode (BarcodeNo ${existing.recordset[0].BarcodeNo}). Cabinet not saved.`,
-    );
-  }
-
-  const update = await new sql.Request(transaction)
-    .input("psNo", sql.BigInt, psNo)
-    .input("serial2", sql.NVarChar(100), serial2)
-    .query(
-      "UPDATE MaterialBarcode SET Serial2 = @serial2 WHERE DocNo = @psNo AND Type = 400",
-    );
-  const updated = update.rowsAffected[0];
-  if (updated === 0) {
-    throw httpError(
-      404,
-      `No MaterialBarcode row found for PSNo ${psNo} with Type 400. Cabinet not saved.`,
-    );
-  }
-  if (updated > 1) {
-    throw httpError(
-      409,
-      `More than one MaterialBarcode row found for PSNo ${psNo} with Type 400. Cabinet not saved.`,
+      `Duplicate NFC! This NFC card (${serial2}) was already used on body serial number ${result.recordset[0].Serial}. Cabinet not saved.`,
     );
   }
 }
 
 export async function saveCabinetScan(data) {
   const pool = await getPool();
-  const transaction = new sql.Transaction(pool);
-  await transaction.begin();
+
+  if (data.area === "FREEZER_PRE") await assertNfcNotUsedBefore(pool, data);
+
   try {
-    const result = await new sql.Request(transaction)
+    const result = await pool
+      .request()
       .input("foamingBarcode", sql.VarChar(15), data.foamingBarcode)
       .input("innerNfc", sql.VarChar(255), data.innerNfc)
       .input("outerNfc", sql.VarChar(255), data.outerNfc)
@@ -91,18 +42,8 @@ export async function saveCabinetScan(data) {
         OUTPUT INSERTED.id, INSERTED.created_at
         VALUES (@foamingBarcode, @innerNfc, @outerNfc, @innerMac, @outerMac, @area);
       `);
-
-    if (data.area === "FREEZER_POST")
-      await linkToMaterialBarcode(transaction, data);
-
-    await transaction.commit();
     return result.recordset[0];
   } catch (error) {
-    try {
-      await transaction.rollback();
-    } catch {
-      /* already rolled back */
-    }
     // 2627 / 2601 = unique constraint violation (foaming_barcode + area)
     if (error.number === 2627 || error.number === 2601) {
       throw httpError(

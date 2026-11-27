@@ -15,10 +15,12 @@ export async function createCabinetScan(req, res, next) {
     } = req.body;
 
     if (!ALLOWED_AREAS.includes(area)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid area. Select Freezer Pre or Freezer Post.",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Invalid area. Select Freezer Pre or Freezer Post.",
+        });
     }
 
     // The foaming barcode is scanned only in Freezer Post. Freezer Pre stores it blank (NULL).
@@ -28,11 +30,13 @@ export async function createCabinetScan(req, res, next) {
         .trim()
         .toUpperCase();
       if (!/^F4\d{13}$/.test(barcode)) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Invalid Foaming Barcode. Expected F4 followed by 13 digits.",
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              "Invalid Foaming Barcode. Expected F4 followed by 13 digits.",
+          });
       }
     }
 
@@ -44,10 +48,12 @@ export async function createCabinetScan(req, res, next) {
         .json({ success: false, message: "Both NFC values are required." });
     }
     if (inner !== outer) {
-      return res.status(400).json({
-        success: false,
-        message: "Inner NFC and Outer NFC do not match.",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Inner NFC and Outer NFC do not match.",
+        });
     }
 
     const innerMac = normalizeCardId(innerNfcMac);
@@ -58,13 +64,15 @@ export async function createCabinetScan(req, res, next) {
         .json({ success: false, message: "Invalid NFC card ID format." });
     }
 
-    // Freezer Post writes "<outer card ID>/<outer value>" to MaterialBarcode.Serial2, so the ID is required.
-    if (area === "FREEZER_POST" && !outerMac) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Outer NFC card ID (UID) is missing. Tap the Outer card with the NFC reader.",
-      });
+    // Freezer Pre checks "<outer card ID>/<outer value>" against MaterialBarcode, so the ID is required there.
+    if (area === "FREEZER_PRE" && !outerMac) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message:
+            "Outer NFC card ID (UID) is missing. Tap the Outer card with the NFC reader.",
+        });
     }
 
     const saved = await saveCabinetScan({
@@ -75,11 +83,13 @@ export async function createCabinetScan(req, res, next) {
       outerMac,
       area,
     });
-    return res.status(201).json({
-      success: true,
-      message: "Cabinet saved successfully.",
-      data: saved,
-    });
+    return res
+      .status(201)
+      .json({
+        success: true,
+        message: "Cabinet saved successfully.",
+        data: saved,
+      });
   } catch (error) {
     next(error);
   }
