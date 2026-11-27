@@ -393,6 +393,18 @@ public class MainActivity extends Activity {
         if (count == 0) return "Foaming Barcode " + barcode + " was not found in ProcessStageLabel. Cabinet not saved.";
         if (count > 1) return "Foaming Barcode " + barcode + " matches more than one PSNo in ProcessStageLabel. Cabinet not saved.";
 
+        // The same Serial2 value must not already exist anywhere in MaterialBarcode.
+        try (PreparedStatement check = connection.prepareStatement(
+                "SELECT TOP 1 BarcodeNo FROM MaterialBarcode WHERE Serial2 = ?")) {
+            check.setString(1, serial2);
+            try (ResultSet rs = check.executeQuery()) {
+                if (rs.next()) {
+                    return "This NFC value (" + serial2 + ") is already stored in MaterialBarcode (BarcodeNo "
+                            + rs.getLong(1) + "). Cabinet not saved.";
+                }
+            }
+        }
+
         int updated;
         try (PreparedStatement update = connection.prepareStatement(
                 "UPDATE MaterialBarcode SET Serial2 = ? WHERE DocNo = ? AND Type = 400")) {

@@ -9,7 +9,7 @@ const httpError = (statusCode, message) =>
 
 // Freezer Post only:
 //   1. ProcessStageLabel: find PSNo for the foaming barcode
-//   2. MaterialBarcode:   set Serial2 = "<outer card ID>/<outer card value>" where DocNo = PSNo and Type = 400
+//   2. MaterialBarcode:   make sure the value is not already stored, then set Serial2 = "<outer card ID>/<outer card value>" where DocNo = PSNo and Type = 400
 // Runs inside the same transaction as the verification INSERT, so everything is saved or nothing is.
 async function linkToMaterialBarcode(transaction, data) {
   const serial2 = `${data.outerMac}/${data.outerNfc}`;
@@ -39,6 +39,19 @@ async function linkToMaterialBarcode(transaction, data) {
     );
   }
   const psNo = psNos[0];
+
+  // The same Serial2 value must not already exist anywhere in MaterialBarcode.
+  const existing = await new sql.Request(transaction)
+    .input("serial2", sql.NVarChar(100), serial2)
+    .query(
+      "SELECT TOP 1 BarcodeNo FROM MaterialBarcode WHERE Serial2 = @serial2",
+    );
+  if (existing.recordset.length > 0) {
+    throw httpError(
+      409,
+      `This NFC value (${serial2}) is already stored in MaterialBarcode (BarcodeNo ${existing.recordset[0].BarcodeNo}). Cabinet not saved.`,
+    );
+  }
 
   const update = await new sql.Request(transaction)
     .input("psNo", sql.BigInt, psNo)
